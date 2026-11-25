@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 let aiInstance: GoogleGenAI | null = null;
 
@@ -87,134 +87,162 @@ export async function generateVideoPlan(req: GeneratePlanRequest): Promise<Video
 
   const baseColors = styleColorPresets[visualStyle] || styleColorPresets.cyber;
 
-  const systemInstruction = `You are an award-winning film director, YouTube storyteller, and SEO strategist.
-Given a user's story, context, or topic, you produce a complete video generation blueprint and YouTube publishing package.
-The output MUST be valid JSON adhering strictly to the schema below.
+  const systemInstruction = `You are a YouTube storyteller and SEO strategist.
+Given a user's story or topic, produce a cohesive multi-scene storyboard and YouTube metadata package in valid JSON.
 
 Required top-level JSON fields:
-- "veoPrompt": string — A vivid, single-paragraph cinematic visual prompt (60-110 words) crafted for a generative AI video model (Veo). Translate the user's story/context into concrete visual imagery: subject, environment, lighting, atmosphere, camera movement (e.g., slow tracking shot, aerial reveal, shallow depth of field), and motion. Never include text overlays or watermarks in the veoPrompt.
-- "musicPrompt": string — A short 15-25 word musical direction describing genre, instruments, tempo, and emotion that complements the story.
 - "youtube": object with:
-  - "title": Engaging YouTube title under 90 characters, high click-through rate, faithful to the story/context.
-  - "description": Full YouTube description summarizing the story/context, scene chapters/timestamps, 5-8 relevant hashtags (#Shorts if 9:16), and a call to action.
-  - "tags": Array of 12-18 relevant search keywords/tags.
+  - "title": Engaging YouTube title under 90 characters.
+  - "description": Concise YouTube description summarizing the story with timestamps, 4-6 hashtags (#Shorts if 9:16), and a call to action.
+  - "tags": Array of 10-14 relevant search keywords/tags.
   - "categoryId": Standard YouTube category ID ("24" Entertainment, "1" Film & Animation, "28" Science & Technology, "27" Education, "22" People & Blogs).
   - "categoryName": Human-readable name for the chosen category.
 - "scenes": Array of exactly ${targetSceneCount} cohesive narrative scenes:
-  - "heading": Punchy 3-7 word scene title.
+  - "heading": Punchy 3-6 word scene title.
   - "subheading": 1 crisp sentence supporting the beat.
-  - "narration": Natural, evocative spoken voiceover (12-18 words per scene).
-  - "badge": Short label (e.g., "CHAPTER 1", "THE TURN", "CLIMAX", "RESOLUTION").
-  - "metricValue": Optional short highlight number/stat if relevant to context, else null.
+  - "narration": Natural spoken voiceover (10-16 words per scene).
+  - "badge": Short label (e.g., "CHAPTER 1", "THE TURN", "CLIMAX", "FINALE").
+  - "metricValue": Optional short highlight stat if relevant, else null.
   - "metricLabel": Optional short label for the metric, else null.
   - "visualIcon": One of ['zap', 'star', 'trending-up', 'cpu', 'shield', 'sparkles', 'flame', 'target', 'globe', 'compass', 'lightbulb', 'atom'].
   - "visualAnimation": One of ['pulse', 'zoom', 'float', 'scanline', 'radar'].
   - "backgroundStyle": One of ['gradient_waves', 'particle_matrix', 'starfield', 'geometric_grid', 'glowing_rings', 'aurora'].
   - "transition": One of ['fade', 'slide', 'zoom', 'none'].
   - "duration": Integer seconds, roughly ${avgSceneDuration}s each.
-  - "emotionalIntensity": Integer 1 to 100 representing narrative tension, energy, or emotional peak of this scene.`;
+  - "emotionalIntensity": Integer 1 to 100 representing emotional intensity of this scene.`;
 
-  const prompt = `Story or Context explained by the creator:
-"${description}"
+  const prompt = `Story or context: "${description}"
+Format: ${aspectRatio} (${aspectRatio === '9:16' ? 'YouTube Shorts' : '16:9'}), ~${durationSec}s total (${targetSceneCount} scenes), theme ${visualStyle}, audio mood ${audioMood}.
+Return the complete JSON object.`;
 
-Target Format:
-- Aspect Ratio: ${aspectRatio} (${aspectRatio === '9:16' ? 'Vertical YouTube Short' : 'Landscape 16:9 YouTube Video'})
-- Target Storyboard Duration: ~${durationSec} seconds (${targetSceneCount} scenes)
-- Visual Aesthetic: ${visualStyle}
-- Audio Mood: ${audioMood}
+  const ai = getAI();
+  let response: any = null;
+  let lastErr: any = null;
 
-Generate the complete JSON blueprint with veoPrompt, musicPrompt, youtube metadata, and scenes.`;
+  const attemptsConfig: Array<{ model: string; thinkingLevel: ThinkingLevel }> = [
+    { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
+    { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
+    { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
+  ];
 
-  try {
-    const ai = getAI();
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        systemInstruction,
-        responseMimeType: 'application/json',
-        temperature: 0.75,
-      },
-    });
-
-    const rawText = response.text || '';
-    const parsed = JSON.parse(rawText);
-
-    const veoPrompt =
-      typeof parsed.veoPrompt === 'string' && parsed.veoPrompt.trim().length > 15
-        ? parsed.veoPrompt.trim()
-        : `Cinematic film scene depicting: ${description}. Rich atmospheric lighting, smooth slow camera motion, shallow depth of field, ultra-detailed textures, natural movement.`;
-
-    const musicPrompt =
-      typeof parsed.musicPrompt === 'string' && parsed.musicPrompt.trim().length > 5
-        ? parsed.musicPrompt.trim()
-        : `Atmospheric ${audioMood} soundtrack with warm synth pads and gentle rhythmic momentum`;
-
-    const youtubeTitle = parsed.youtube?.title || `${description.slice(0, 65)} | Story`;
-    const youtubeDescription = parsed.youtube?.description || `${description}\n\n#YouTube #Story`;
-    const youtubeTags =
-      Array.isArray(parsed.youtube?.tags) && parsed.youtube.tags.length > 0
-        ? parsed.youtube.tags.map((t: any) => String(t).trim()).filter(Boolean)
-        : ['story', 'ai video', 'youtube', 'creative', 'shorts'];
-    const categoryId = String(parsed.youtube?.categoryId || '24');
-    const categoryName = parsed.youtube?.categoryName || 'Entertainment';
-
-    const rawScenes: any[] = Array.isArray(parsed.scenes) ? parsed.scenes : [];
-    const scenes: ScenePlan[] = rawScenes.map((sc: any, idx: number) => {
-      const sceneNum = idx + 1;
-      const duration = Number(sc.duration) || avgSceneDuration;
-      return {
-        id: `scene-${sceneNum}-${Date.now().toString(36)}`,
-        sceneNumber: sceneNum,
-        heading: sc.heading || `Scene ${sceneNum}`,
-        subheading: sc.subheading || sc.narration || '',
-        narration: sc.narration || sc.subheading || 'Watch as the story unfolds.',
-        badge: sc.badge || `PART ${sceneNum}`,
-        metricValue: sc.metricValue || undefined,
-        metricLabel: sc.metricLabel || undefined,
-        visualIcon: sc.visualIcon || 'sparkles',
-        visualAnimation: sc.visualAnimation || 'pulse',
-        backgroundStyle: sc.backgroundStyle || 'gradient_waves',
-        bgColors: Array.isArray(sc.bgColors) && sc.bgColors.length === 3 ? sc.bgColors : baseColors,
-        duration: Math.max(3, Math.min(15, duration)),
-        transition: ['fade', 'slide', 'zoom', 'none'].includes(sc.transition)
-          ? sc.transition
-          : idx % 3 === 1
-          ? 'slide'
-          : idx % 3 === 2
-          ? 'zoom'
-          : 'fade',
-        emotionalIntensity:
-          typeof sc.emotionalIntensity === 'number' && sc.emotionalIntensity >= 1 && sc.emotionalIntensity <= 100
-            ? Math.round(sc.emotionalIntensity)
-            : Math.min(98, Math.max(30, 45 + Math.round((idx / Math.max(1, rawScenes.length - 1)) * 45))),
-      };
-    });
-
-    if (scenes.length === 0) {
-      scenes.push(...createFallbackScenes(description, targetSceneCount, avgSceneDuration, baseColors));
+  for (let attempt = 0; attempt < attemptsConfig.length; attempt++) {
+    const cfg = attemptsConfig[attempt];
+    try {
+      response = await ai.models.generateContent({
+        model: cfg.model,
+        contents: prompt,
+        config: {
+          systemInstruction,
+          responseMimeType: 'application/json',
+          thinkingConfig: { thinkingLevel: cfg.thinkingLevel },
+        },
+      });
+      break;
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message || '');
+      const status = err?.status;
+      const isTransient =
+        status === 503 ||
+        status === 429 ||
+        status === 404 ||
+        msg.includes('"code":503') ||
+        msg.includes('UNAVAILABLE');
+      if (!isTransient || attempt === attemptsConfig.length - 1) {
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, 600 * Math.pow(2, attempt)));
     }
-
-    return {
-      veoPrompt,
-      musicPrompt,
-      youtube: {
-        title: youtubeTitle.slice(0, 100),
-        description: youtubeDescription,
-        tags: youtubeTags.slice(0, 20),
-        categoryId,
-        categoryName,
-        privacyStatus,
-        aspectRatio,
-        visualStyle,
-        audioMood,
-      },
-      scenes,
-    };
-  } catch (error) {
-    console.error('Gemini generation error, using fallback creator:', error);
-    return createCompleteFallback(description, aspectRatio, durationSec, visualStyle, audioMood, privacyStatus, baseColors);
   }
+
+  if (!response) {
+    throw lastErr || new Error('Gemini API request failed.');
+  }
+
+  const rawText = (response.text || '')
+    .trim()
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```$/i, '')
+    .trim();
+
+  if (!rawText) {
+    throw new Error('Gemini returned an empty response while generating the video plan.');
+  }
+
+  const parsed = JSON.parse(rawText);
+
+  const veoPrompt =
+    typeof parsed.veoPrompt === 'string' && parsed.veoPrompt.trim().length > 15
+      ? parsed.veoPrompt.trim()
+      : `Cinematic film scene depicting: ${description}. Rich atmospheric lighting, smooth slow camera motion, shallow depth of field, ultra-detailed textures, natural movement.`;
+
+  const musicPrompt =
+    typeof parsed.musicPrompt === 'string' && parsed.musicPrompt.trim().length > 5
+      ? parsed.musicPrompt.trim()
+      : `Atmospheric ${audioMood} soundtrack with warm synth pads and gentle rhythmic momentum`;
+
+  const youtubeTitle = parsed.youtube?.title || `${description.slice(0, 65)} | Story`;
+  const youtubeDescription = parsed.youtube?.description || `${description}\n\n#YouTube #Story`;
+  const youtubeTags =
+    Array.isArray(parsed.youtube?.tags) && parsed.youtube.tags.length > 0
+      ? parsed.youtube.tags.map((t: any) => String(t).trim()).filter(Boolean)
+      : ['story', 'ai video', 'youtube', 'creative', 'shorts'];
+  const categoryId = String(parsed.youtube?.categoryId || '24');
+  const categoryName = parsed.youtube?.categoryName || 'Entertainment';
+
+  const rawScenes: any[] = Array.isArray(parsed.scenes) ? parsed.scenes : [];
+  const scenes: ScenePlan[] = rawScenes.map((sc: any, idx: number) => {
+    const sceneNum = idx + 1;
+    const duration = Number(sc.duration) || avgSceneDuration;
+    return {
+      id: `scene-${sceneNum}-${Date.now().toString(36)}`,
+      sceneNumber: sceneNum,
+      heading: sc.heading || `Scene ${sceneNum}`,
+      subheading: sc.subheading || sc.narration || '',
+      narration: sc.narration || sc.subheading || 'Watch as the story unfolds.',
+      badge: sc.badge || `PART ${sceneNum}`,
+      metricValue: sc.metricValue || undefined,
+      metricLabel: sc.metricLabel || undefined,
+      visualIcon: sc.visualIcon || 'sparkles',
+      visualAnimation: sc.visualAnimation || 'pulse',
+      backgroundStyle: sc.backgroundStyle || 'gradient_waves',
+      bgColors: Array.isArray(sc.bgColors) && sc.bgColors.length === 3 ? sc.bgColors : baseColors,
+      duration: Math.max(3, Math.min(15, duration)),
+      transition: ['fade', 'slide', 'zoom', 'none'].includes(sc.transition)
+        ? sc.transition
+        : idx % 3 === 1
+        ? 'slide'
+        : idx % 3 === 2
+        ? 'zoom'
+        : 'fade',
+      emotionalIntensity:
+        typeof sc.emotionalIntensity === 'number' && sc.emotionalIntensity >= 1 && sc.emotionalIntensity <= 100
+          ? Math.round(sc.emotionalIntensity)
+          : Math.min(98, Math.max(30, 45 + Math.round((idx / Math.max(1, rawScenes.length - 1)) * 45))),
+    };
+  });
+
+  if (scenes.length === 0) {
+    scenes.push(...createFallbackScenes(description, targetSceneCount, avgSceneDuration, baseColors));
+  }
+
+  return {
+    veoPrompt,
+    musicPrompt,
+    youtube: {
+      title: youtubeTitle.slice(0, 100),
+      description: youtubeDescription,
+      tags: youtubeTags.slice(0, 20),
+      categoryId,
+      categoryName,
+      privacyStatus,
+      aspectRatio,
+      visualStyle,
+      audioMood,
+    },
+    scenes,
+  };
 }
 
 function createFallbackScenes(

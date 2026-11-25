@@ -179,7 +179,19 @@ export const SceneEditor: React.FC<SceneEditorProps> = ({
         }),
       });
 
-      const payload = await res.json().catch(() => ({}));
+      const rawBody = await res.text();
+      const trimmed = rawBody.trimStart();
+      if (trimmed.startsWith('<')) {
+        throw new Error(`TTS endpoint returned HTML instead of JSON (HTTP ${res.status}).`);
+      }
+
+      let payload: any = {};
+      try {
+        payload = rawBody ? JSON.parse(rawBody) : {};
+      } catch {
+        throw new Error(`Invalid JSON response from TTS endpoint (HTTP ${res.status}).`);
+      }
+
       if (!res.ok) {
         throw new Error(payload.error || `Audio preview failed (HTTP ${res.status})`);
       }

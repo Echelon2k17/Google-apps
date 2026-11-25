@@ -3,9 +3,7 @@ import {
   Youtube,
   Download,
   Sliders,
-  Sparkles,
   CheckCircle2,
-  Film,
   RefreshCw,
 } from 'lucide-react';
 import { Navbar } from './components/Navbar';
@@ -134,33 +132,68 @@ export default function App() {
     setProgressStage('Understanding your story & writing YouTube title, description, and tags...');
 
     try {
-      // Step 1: Generate story blueprint, Veo prompt, scenes, and YouTube SEO metadata
-      const planRes = await fetch('/api/generate-plan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          description: params.storyPrompt,
-          aspectRatio: params.aspectRatio,
-          durationSec: params.durationSec,
-          visualStyle: params.visualStyle,
-          audioMood: params.audioMood,
-          privacyStatus: params.privacyStatus,
-        }),
-      });
+      // Step 1: Generate story blueprint, scenes, and YouTube SEO metadata
+      let plan: any = null;
+      let lastFetchError: Error | null = null;
 
-      if (!planRes.ok) {
-        const errData = await planRes.json().catch(() => ({}));
-        throw new Error(errData.error || `Failed to generate story plan (HTTP ${planRes.status})`);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const planRes = await fetch('/api/generate-plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            description: params.storyPrompt,
+            aspectRatio: params.aspectRatio,
+            durationSec: params.durationSec,
+            visualStyle: params.visualStyle,
+            audioMood: params.audioMood,
+            privacyStatus: params.privacyStatus,
+          }),
+        });
+
+        const rawBody = await planRes.text();
+        const trimmed = rawBody.trimStart();
+        const looksLikeHtml =
+          trimmed.startsWith('<') ||
+          (planRes.headers.get('content-type') || '').includes('text/html');
+
+        if (looksLikeHtml) {
+          lastFetchError = new Error(
+            `Backend returned HTML instead of JSON (HTTP ${planRes.status}). If the preview server just restarted, please retry.`
+          );
+          if (attempt === 0) {
+            await new Promise((r) => setTimeout(r, 1200));
+            continue;
+          }
+          throw lastFetchError;
+        }
+
+        let parsedBody: any = {};
+        try {
+          parsedBody = rawBody ? JSON.parse(rawBody) : {};
+        } catch {
+          throw new Error(`Invalid JSON response from /api/generate-plan (HTTP ${planRes.status}).`);
+        }
+
+        if (!planRes.ok) {
+          throw new Error(
+            parsedBody.error || `Failed to generate story plan (HTTP ${planRes.status})`
+          );
+        }
+
+        plan = parsedBody;
+        break;
       }
 
-      const plan = await planRes.json();
+      if (!plan) {
+        throw lastFetchError || new Error('Failed to generate story plan.');
+      }
 
       const newProject: VideoProject = {
         id: `proj-${Date.now().toString(36)}`,
         promptDescription: params.storyPrompt,
         veoPrompt: plan.veoPrompt,
         musicPrompt: plan.musicPrompt,
-        generationEngine: params.engine,
+        generationEngine: 'storyboard',
         createdAt: Date.now(),
         youtube: {
           ...plan.youtube,
@@ -175,124 +208,28 @@ export default function App() {
       setProject(newProject);
       setActiveSceneIndex(0);
 
-      let finalBlob: Blob;
-      let finalUrl: string;
+      setProgressPercent(30);
+      setProgressStage('Rendering narrated multi-scene video...');
+      setIsVeoVideoActive(false);
 
-      if (params.engine === 'veo') {
-        // Step 2A: Generate real cinematic AI video with Veo 3
-        setProgressPercent(25);
-        setProgressStage('Starting Veo 3 AI video generation from your story...');
-        setIsVeoVideoActive(true);
-
-        const veoPayload: any = {
-          prompt: plan.veoPrompt || params.storyPrompt,
+      const rendered = await exportVideo(
+        newProject.scenes,
+        {
           aspectRatio: params.aspectRatio,
-          resolution: '720p',
-        };
-
-        if (params.referenceImage) {
-          veoPayload.image = {
-            dataUrl: params.referenceImage.dataUrl,
-            mimeType: params.referenceImage.mimeType,
-          };
+          audioMood: params.audioMood,
+          showSubtitles: true,
+          showProgressBar: true,
+          watermarkText: 'TubeCraft Studio',
+        },
+        (prog) => {
+          const scaled = Math.min(98, 30 + Math.round(prog.percent * 0.68));
+          setProgressPercent(scaled);
+          setProgressStage(prog.statusText);
         }
+      );
 
-        const initRes = await fetch('/api/veo/generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(veoPayload),
-        });
-
-        if (!initRes.ok) {
-          const errJson = await initRes.json().catch(() => ({}));
-          throw new Error(errJson.error || `Veo generation failed (HTTP ${initRes.status})`);
-        }
-
-        const { operationName } = await initRes.json();
-        if (!operationName) {
-          throw new Error('No operation ID returned from Veo 3.');
-        }
-
-        // Poll Veo 3 until complete
-        let isDone = false;
-        let attempts = 0;
-        const maxAttempts = 90;
-
-        while (!isDone && attempts < maxAttempts) {
-          attempts++;
-          await new Promise((r) => setTimeout(r, 4000));
-
-          const est = Math.min(92, 30 + Math.round((attempts / 24) * 60));
-          setProgressPercent(est);
-          setProgressStage(
-            attempts < 6
-              ? 'Generating video frames from your story...'
-              : attempts < 14
-              ? 'Rendering cinematic lighting and motion physics...'
-              : `Finalizing high-definition video (${attempts * 4}s)...`
-          );
-
-          const statusRes = await fetch('/api/veo/status', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ operationName }),
-          });
-
-          if (!statusRes.ok) continue;
-          const statusData = await statusRes.json();
-
-          if (statusData.error) {
-            throw new Error(statusData.error);
-          }
-          if (statusData.done) {
-            isDone = true;
-          }
-        }
-
-        if (!isDone) {
-          throw new Error('Video generation timed out. Please try again.');
-        }
-
-        setProgressPercent(96);
-        setProgressStage('Downloading generated MP4 video...');
-
-        const downloadRes = await fetch('/api/veo/download', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ operationName }),
-        });
-
-        if (!downloadRes.ok) {
-          throw new Error(`Failed to download generated video (HTTP ${downloadRes.status})`);
-        }
-
-        finalBlob = await downloadRes.blob();
-        finalUrl = URL.createObjectURL(finalBlob);
-      } else {
-        // Step 2B: Render Narrated Multi-Scene Storyboard directly to video
-        setProgressPercent(30);
-        setProgressStage('Rendering narrated multi-scene video...');
-        setIsVeoVideoActive(false);
-
-        const rendered = await exportVideo(
-          newProject.scenes,
-          {
-            aspectRatio: params.aspectRatio,
-            audioMood: params.audioMood,
-            showSubtitles: true,
-            showProgressBar: true,
-            watermarkText: 'TubeCraft Studio',
-          },
-          (prog) => {
-            const scaled = Math.min(98, 30 + Math.round(prog.percent * 0.68));
-            setProgressPercent(scaled);
-            setProgressStage(prog.statusText);
-          }
-        );
-
-        finalBlob = rendered.blob;
-        finalUrl = rendered.url;
-      }
+      const finalBlob = rendered.blob;
+      const finalUrl = rendered.url;
 
       setRenderedBlob(finalBlob);
       setRenderedUrl(finalUrl);
@@ -528,9 +465,6 @@ export default function App() {
             isWorking={isWorking}
             progressStage={progressStage}
             progressPercent={progressPercent}
-            onMusicGenerated={(_url, _blob, prompt) =>
-              showToast(`Custom music ready for "${prompt.slice(0, 35)}..."`)
-            }
           />
         </section>
 
@@ -557,10 +491,7 @@ export default function App() {
                   Generated Video & YouTube Post
                 </h2>
                 <p className="text-xs text-zinc-400">
-                  {isVeoVideoActive
-                    ? 'Veo 3 AI Video · '
-                    : 'Narrated Storyboard · '}
-                  {project.youtube.aspectRatio} ·{' '}
+                  Narrated Storyboard · {project.youtube.aspectRatio} ·{' '}
                   {renderedBlob
                     ? `${(renderedBlob.size / (1024 * 1024)).toFixed(1)} MB ready`
                     : 'Needs re-encoding'}
@@ -578,19 +509,8 @@ export default function App() {
                   activeSceneIndex={activeSceneIndex}
                   onSceneChange={(idx) => setActiveSceneIndex(idx)}
                   renderedVideoUrl={renderedUrl}
-                  isVeoVideo={isVeoVideoActive}
+                  isVeoVideo={false}
                 />
-
-                {/* Director's Visual Prompt Note (when Veo generated) */}
-                {isVeoVideoActive && project.veoPrompt && (
-                  <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-3.5 text-xs space-y-1">
-                    <div className="flex items-center space-x-1.5 text-zinc-300 font-semibold">
-                      <Film className="w-3.5 h-3.5 text-red-400" />
-                      <span>AI Director Visual Prompt</span>
-                    </div>
-                    <p className="text-zinc-400 leading-relaxed">{project.veoPrompt}</p>
-                  </div>
-                )}
 
                 {/* Export & Direct YouTube Post Buttons */}
                 <div className="bg-zinc-900/75 border border-zinc-800 rounded-xl p-4 space-y-3">
