@@ -1,0 +1,6 @@
+{
+  "name": "TubeCraft AI - Video Creator & YouTube Direct Uploader",
+  "description": "Create engaging videos from content descriptions with AI-generated storyboards, automatic SEO titles, descriptions, and tags, and upload directly to YouTube via YouTube Data API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
